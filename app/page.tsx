@@ -1,6 +1,17 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import StatusBar from './components/StatusBar';
+import ApiKeyModal from './components/ApiKeyModal';
+import {
+  getPermissionState,
+  incrementDailyCount,
+  markTrialUsed,
+  activatePaid,
+  deactivatePaid,
+  resetForTest,
+  type PermissionState,
+} from './lib/permissions';
 
 interface DesignScheme {
   id: number;
@@ -29,34 +40,96 @@ export default function HomePage() {
   const [copiedColor, setCopiedColor] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // Permission state
+  const [perms, setPerms] = useState<PermissionState>(getPermissionState);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const pendingGenerateRef = useRef(false);
+
+  // Sync permission state with localStorage on mount
+  useEffect(() => {
+    setPerms(getPermissionState());
+  }, []);
+
+  const refreshPerms = useCallback(() => {
+    setPerms(getPermissionState());
+  }, []);
+
   const showToast = useCallback((message: string) => {
     setToast(message);
   }, []);
 
   useEffect(() => {
     if (toast) {
-      const timer = setTimeout(() => setToast(null), 1500);
+      const timer = setTimeout(() => setToast(null), 2500);
       return () => clearTimeout(timer);
     }
   }, [toast]);
 
-  const handleGenerate = useCallback(async () => {
+  const doGenerate = useCallback(async (userApiKey?: string, userBaseUrl?: string) => {
     setLoading(true);
     setResults([]);
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ industry, style }),
+        body: JSON.stringify({
+          industry,
+          style,
+          ...(userApiKey ? { userApiKey, userBaseUrl: userBaseUrl || 'https://api.openai.com/v1' } : {}),
+        }),
       });
       const data: DesignScheme[] = await res.json();
       setResults(data);
+
+      // Update counters
+      const currentPerms = getPermissionState();
+      if (currentPerms.isPaid && !currentPerms.trialUsed) {
+        markTrialUsed();
+      }
+      if (!currentPerms.isPaid) {
+        incrementDailyCount();
+      }
+      refreshPerms();
     } catch {
       // fallback silently
     } finally {
       setLoading(false);
     }
-  }, [industry, style]);
+  }, [industry, style, refreshPerms]);
+
+  const handleGenerate = useCallback(async () => {
+    const currentPerms = getPermissionState();
+    setPerms(currentPerms);
+
+    // Free user: check daily limit
+    if (!currentPerms.isPaid && !currentPerms.canGenerate) {
+      showToast('Free limit reached. Come back tomorrow or upgrade to PRO.');
+      return;
+    }
+
+    // Paid user: check if needs own API key
+    if (currentPerms.needsUserApiKey) {
+      pendingGenerateRef.current = true;
+      setShowApiKeyModal(true);
+      return;
+    }
+
+    // Free user or paid trial: use server API key
+    await doGenerate();
+  }, [doGenerate, showToast]);
+
+  const handleApiKeySubmit = useCallback(async (apiKey: string, baseUrl: string) => {
+    setShowApiKeyModal(false);
+    if (pendingGenerateRef.current) {
+      pendingGenerateRef.current = false;
+      await doGenerate(apiKey, baseUrl);
+    }
+  }, [doGenerate]);
+
+  const handleApiKeyCancel = useCallback(() => {
+    setShowApiKeyModal(false);
+    pendingGenerateRef.current = false;
+  }, []);
 
   const handleCopyCode = useCallback(async (code: string, id: number) => {
     await navigator.clipboard.writeText(code);
@@ -70,8 +143,65 @@ export default function HomePage() {
     showToast('Copied!');
   }, [showToast]);
 
+  const handleActivate = useCallback(() => {
+    activatePaid();
+    refreshPerms();
+    showToast('PRO activated! (Test mode)');
+  }, [refreshPerms, showToast]);
+
+  const handleDeactivate = useCallback(() => {
+    deactivatePaid();
+    refreshPerms();
+    showToast('Reset to Free mode');
+  }, [refreshPerms, showToast]);
+
+  const handleReset = useCallback(() => {
+    resetForTest();
+    setResults([]);
+    refreshPerms();
+    showToast('All reset for testing');
+  }, [refreshPerms, showToast]);
+
   return (
     <main className="min-h-screen px-4 py-12 md:py-20">
+      {/* Status Bar */}
+      <StatusBar
+        isPaid={perms.isPaid}
+        dailyCount={perms.dailyCount}
+        dailyLimit={perms.dailyLimit}
+        trialUsed={perms.trialUsed}
+      />
+
+      {/* Test Controls */}
+      <div className="fixed top-4 left-4 z-40 flex flex-col gap-1.5">
+        {!perms.isPaid ? (
+          <button
+            onClick={handleActivate}
+            className="px-3 py-1.5 rounded-full text-xs font-semibold shadow-lg bg-white/90 text-[#6C63FF] border border-[#6C63FF]/30 hover:bg-[#6C63FF] hover:text-white transition-all"
+          >
+            Activate PRO (Test)
+          </button>
+        ) : (
+          <button
+            onClick={handleDeactivate}
+            className="px-3 py-1.5 rounded-full text-xs font-semibold shadow-lg bg-white/90 text-amber-600 border border-amber-300 hover:bg-amber-500 hover:text-white transition-all"
+          >
+            Deactivate PRO
+          </button>
+        )}
+        <button
+          onClick={handleReset}
+          className="px-3 py-1.5 rounded-full text-xs font-semibold shadow-lg bg-white/90 text-gray-500 border border-gray-200 hover:bg-gray-100 transition-all"
+        >
+          Reset All
+        </button>
+      </div>
+
+      {/* API Key Modal */}
+      {showApiKeyModal && (
+        <ApiKeyModal onSubmit={handleApiKeySubmit} onCancel={handleApiKeyCancel} />
+      )}
+
       {/* Toast Notification */}
       {toast && (
         <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 animate-toast-in">
@@ -87,9 +217,9 @@ export default function HomePage() {
       {/* Header */}
       <header className="text-center mb-12 relative">
         <div className="absolute top-full left-1/2 -translate-x-1/2 mt-6 w-48 h-1 bg-gradient-to-r from-transparent via-[#6C63FF] to-transparent rounded-full opacity-60" />
-        
+
         <h1 className="text-5xl md:text-6xl font-bold gradient-text mb-4 tracking-tight">
-          🎨 Stylie
+          Stylie
         </h1>
         <p className="text-gray-500 text-lg md:text-xl max-w-xl mx-auto">
           Describe your store vibe, AI generates your perfect theme
@@ -99,6 +229,18 @@ export default function HomePage() {
       {/* Form */}
       <div className="max-w-xl mx-auto mb-16">
         <div className="bg-white rounded-2xl shadow-xl p-6 md:p-8 space-y-5 border border-gray-100">
+          {/* Free limit warning */}
+          {!perms.isPaid && perms.dailyCount >= perms.dailyLimit && (
+            <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-center">
+              <p className="text-sm font-semibold text-red-600">
+                Free limit reached ({perms.dailyCount}/{perms.dailyLimit})
+              </p>
+              <p className="text-xs text-red-500 mt-1">
+                Come back tomorrow or upgrade to PRO to unlock all features
+              </p>
+            </div>
+          )}
+
           {/* Industry Select */}
           <div>
             <label className="block text-sm font-semibold text-gray-600 mb-2">
@@ -135,7 +277,7 @@ export default function HomePage() {
           {/* Generate Button */}
           <button
             onClick={handleGenerate}
-            disabled={loading}
+            disabled={loading || (!perms.isPaid && perms.dailyCount >= perms.dailyLimit)}
             className="btn-primary w-full py-4 rounded-xl text-white font-semibold text-lg disabled:opacity-70 disabled:cursor-not-allowed shadow-lg shadow-[#6C63FF]/30 flex items-center justify-center gap-3"
           >
             {loading ? (
@@ -158,7 +300,7 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Loading Skeleton */}
+      {/* Loading Skeleton — shown regardless of permission */}
       {loading && (
         <section className="max-w-[1200px] mx-auto">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -187,8 +329,33 @@ export default function HomePage() {
         </section>
       )}
 
-      {/* Results */}
-      {results.length > 0 && (
+      {/* Free user: results hidden — show upsell instead */}
+      {!loading && results.length > 0 && !perms.canViewResults && (
+        <section className="max-w-xl mx-auto text-center">
+          <div className="bg-white rounded-2xl shadow-lg p-8 border border-gray-100">
+            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-[#6C63FF] to-[#E040FB] flex items-center justify-center">
+              <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 008 4.07M3 15.364c.64-1.319 1-2.8 1-4.364 0-1.457.39-2.823 1.07-4" />
+              </svg>
+            </div>
+            <h3 className="text-xl font-bold text-gray-700 mb-2">
+              {perms.dailyCount} Design{perms.dailyCount > 1 ? 's' : ''} Generated Today
+            </h3>
+            <p className="text-gray-500 mb-6">
+              Upgrade to PRO to unlock full design previews and one-click code copy.
+            </p>
+            <button
+              onClick={handleActivate}
+              className="px-8 py-3 rounded-xl text-white font-semibold bg-gradient-to-r from-[#6C63FF] to-[#E040FB] hover:shadow-lg hover:shadow-[#6C63FF]/30 transition-all"
+            >
+              Upgrade to PRO
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Paid user: show full results */}
+      {!loading && results.length > 0 && perms.canViewResults && (
         <section className="max-w-[1200px] mx-auto">
           <h2 className="text-2xl font-bold text-gray-700 mb-8 text-center">
             {results.length} Design Schemes Generated
@@ -207,7 +374,7 @@ export default function HomePage() {
                   </h3>
                   {idx === 0 && (
                     <span className="px-3 py-1 bg-gradient-to-r from-[#6C63FF]/10 to-[#E040FB]/10 text-[#6C63FF] text-xs font-semibold rounded-full flex items-center gap-1">
-                      ✨ Recommended
+                      Recommended
                     </span>
                   )}
                 </div>
@@ -225,7 +392,7 @@ export default function HomePage() {
                           title={`Click to copy ${scheme.colors[key]}`}
                         >
                           <span className={`absolute inset-0 flex items-center justify-center text-white text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-all bg-black/50 backdrop-blur-sm ${copiedColor === scheme.colors[key] ? '!opacity-100 !bg-black/60' : ''}`}>
-                            {copiedColor === scheme.colors[key] ? '✓' : 'COPY'}
+                            {copiedColor === scheme.colors[key] ? 'OK' : 'COPY'}
                           </span>
                         </button>
                         <span className="text-xs text-gray-400 font-mono">
@@ -261,12 +428,12 @@ export default function HomePage() {
                       : 'border-2 border-[#6C63FF] text-[#6C63FF] hover:bg-[#6C63FF] hover:text-white'
                   }`}
                 >
-                  {copiedId === scheme.id ? 'Copied! ✓' : 'Copy Shopify Code'}
+                  {copiedId === scheme.id ? 'Copied!' : 'Copy Shopify Code'}
                 </button>
               </div>
             ))}
           </div>
-          
+
           {/* Footer Disclaimer */}
           <p className="text-center text-gray-400 text-sm mt-12">
             Generated designs are suggestions. Adjust based on your brand identity.

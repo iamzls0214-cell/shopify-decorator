@@ -76,13 +76,14 @@ function parseAIResponse(content: string): DesignScheme[] {
 
 export async function POST(request: NextRequest) {
   try {
-    const { industry, style } = await request.json();
+    const { industry, style, userApiKey, userBaseUrl } = await request.json();
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    const baseURL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+    // Use user's API key if provided (paid user 2nd+ call), otherwise use server key
+    const apiKey = userApiKey || process.env.OPENAI_API_KEY;
+    const baseURL = userBaseUrl || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
 
     if (!apiKey) {
-      console.warn('OPENAI_API_KEY not set, using fallback data');
+      console.warn('No API key available, using fallback data');
       return NextResponse.json(fallbackSchemes);
     }
 
